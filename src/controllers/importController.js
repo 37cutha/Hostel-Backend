@@ -1,39 +1,52 @@
 const pool = require('../config/db');
 
-// School coordinates
 const SCHOOL_LAT = -0.088794;
 const SCHOOL_LNG = 37.989700;
 
+// Try multiple Overpass servers in case one is busy
+const OVERPASS_SERVERS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+];
+
 async function fetchOverpass(query) {
   const fetch = (await import('node-fetch')).default;
-  const response = await fetch('https://overpass-api.de/api/interpreter', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: `data=${encodeURIComponent(query)}`,
-  });
 
-  const text = await response.text();
+  for (const server of OVERPASS_SERVERS) {
+    try {
+      console.log(`Trying Overpass server: ${server}`);
+      const response = await fetch(server, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `data=${encodeURIComponent(query)}`,
+        timeout: 25000,
+      });
 
-  if (!response.ok) {
-    throw new Error(`Overpass API error: ${response.status} - ${text.substring(0, 200)}`);
+      if (!response.ok) {
+        console.log(`Server ${server} returned ${response.status}, trying next...`);
+        continue;
+      }
+
+      const text = await response.text();
+      return JSON.parse(text);
+    } catch (err) {
+      console.log(`Server ${server} failed: ${err.message}, trying next...`);
+      continue;
+    }
   }
 
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error(`Invalid JSON from Overpass: ${text.substring(0, 200)}`);
-  }
+  throw new Error('All Overpass servers failed or timed out. Try again later.');
 }
 
 async function importFromOpenStreetMap(req, res) {
   try {
-    const radiusMeters = 10000;
+    const radiusMeters = 5000; // reduced to 5km for faster query
 
-    const query = `[out:json][timeout:30];
+    // Simplified query — just nodes, no ways, shorter timeout
+    const query = `[out:json][timeout:20];
 (
-  node["tourism"="hostel"](around:${radiusMeters},${SCHOOL_LAT},${SCHOOL_LNG});
-  node["tourism"="guest_house"](around:${radiusMeters},${SCHOOL_LAT},${SCHOOL_LNG});
-  node["tourism"="hotel"](around:${radiusMeters},${SCHOOL_LAT},${SCHOOL_LNG});
+  node["tourism"~"hostel|guest_house|hotel"](around:${radiusMeters},${SCHOOL_LAT},${SCHOOL_LNG});
   node["building"="dormitory"](around:${radiusMeters},${SCHOOL_LAT},${SCHOOL_LNG});
 );
 out body;`;
@@ -43,9 +56,9 @@ out body;`;
 
     if (elements.length === 0) {
       return res.json({
-        message: 'No hostels found on OpenStreetMap near your school location.',
+        message: 'No hostels found on OpenStreetMap near your school. Your area may not be well mapped yet.',
         imported: 0,
-        tip: 'Your area may not have many mapped hostels on OpenStreetMap yet.',
+        suggestion: 'You can add hostels manually through the app instead.',
       });
     }
 
@@ -56,15 +69,13 @@ out body;`;
       const lat = el.lat;
       const lng = el.lon;
       const tags = el.tags || {};
-      const name = tags.name || tags['name:en'] || 'Unnamed Hostel';
+      const name = tags.name || 'Unnamed Hostel';
       const address = [
         tags['addr:street'],
         tags['addr:city'],
         tags['addr:suburb'],
         tags['addr:town'],
-      ]
-        .filter(Boolean)
-        .join(', ') || null;
+      ].filter(Boolean).join(', ') || null;
 
       if (!lat || !lng) continue;
 
@@ -79,8 +90,7 @@ out body;`;
       }
 
       await pool.query(
-        `INSERT INTO hostels 
-          (name, address, latitude, longitude, description, amenities, billing_period)
+        `INSERT INTO hostels (name, address, latitude, longitude, description, amenities, billing_period)
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         [
           name,
