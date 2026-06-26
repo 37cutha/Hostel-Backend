@@ -100,9 +100,9 @@ async function importFromOpenStreetMap(req, res) {
       skipped,
       total: elements.length,
     });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to import from OpenStreetMap' });
+ } catch (err) {
+    console.error('OSM Import Error:', err.message, err.stack);
+    res.status(500).json({ error: 'Failed to import from OpenStreetMap', details: err.message });
   }
 }
 
