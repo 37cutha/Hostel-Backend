@@ -1,51 +1,51 @@
 const pool = require('../config/db');
-const https = require('https');
 
 // School coordinates
 const SCHOOL_LAT = -0.088794;
 const SCHOOL_LNG = 37.989700;
 
-function fetchOverpass(query) {
-  return new Promise((resolve, reject) => {
-    const url = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`;
-    https.get(url, (res) => {
-      let data = '';
-      res.on('data', (chunk) => (data += chunk));
-      res.on('end', () => {
-        try {
-          resolve(JSON.parse(data));
-        } catch (e) {
-          reject(e);
-        }
-      });
-    }).on('error', reject);
+async function fetchOverpass(query) {
+  const fetch = (await import('node-fetch')).default;
+  const response = await fetch('https://overpass-api.de/api/interpreter', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `data=${encodeURIComponent(query)}`,
   });
+
+  const text = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`Overpass API error: ${response.status} - ${text.substring(0, 200)}`);
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`Invalid JSON from Overpass: ${text.substring(0, 200)}`);
+  }
 }
 
 async function importFromOpenStreetMap(req, res) {
   try {
-    const radiusMeters = 10000; // 10km radius around school
+    const radiusMeters = 10000;
 
-    const query = `
-      [out:json][timeout:25];
-      (
-        node["tourism"="hostel"](around:${radiusMeters},${SCHOOL_LAT},${SCHOOL_LNG});
-        node["tourism"="guest_house"](around:${radiusMeters},${SCHOOL_LAT},${SCHOOL_LNG});
-        node["tourism"="hotel"](around:${radiusMeters},${SCHOOL_LAT},${SCHOOL_LNG});
-        node["building"="dormitory"](around:${radiusMeters},${SCHOOL_LAT},${SCHOOL_LNG});
-        way["tourism"="hostel"](around:${radiusMeters},${SCHOOL_LAT},${SCHOOL_LNG});
-        way["tourism"="guest_house"](around:${radiusMeters},${SCHOOL_LAT},${SCHOOL_LNG});
-      );
-      out center;
-    `;
+    const query = `[out:json][timeout:30];
+(
+  node["tourism"="hostel"](around:${radiusMeters},${SCHOOL_LAT},${SCHOOL_LNG});
+  node["tourism"="guest_house"](around:${radiusMeters},${SCHOOL_LAT},${SCHOOL_LNG});
+  node["tourism"="hotel"](around:${radiusMeters},${SCHOOL_LAT},${SCHOOL_LNG});
+  node["building"="dormitory"](around:${radiusMeters},${SCHOOL_LAT},${SCHOOL_LNG});
+);
+out body;`;
 
     const data = await fetchOverpass(query);
     const elements = data.elements || [];
 
     if (elements.length === 0) {
       return res.json({
-        message: 'No hostels found on OpenStreetMap near your school location',
+        message: 'No hostels found on OpenStreetMap near your school location.',
         imported: 0,
+        tip: 'Your area may not have many mapped hostels on OpenStreetMap yet.',
       });
     }
 
@@ -53,14 +53,15 @@ async function importFromOpenStreetMap(req, res) {
     let skipped = 0;
 
     for (const el of elements) {
-      const lat = el.lat || el.center?.lat;
-      const lng = el.lon || el.center?.lon;
+      const lat = el.lat;
+      const lng = el.lon;
       const tags = el.tags || {};
       const name = tags.name || tags['name:en'] || 'Unnamed Hostel';
       const address = [
         tags['addr:street'],
         tags['addr:city'],
         tags['addr:suburb'],
+        tags['addr:town'],
       ]
         .filter(Boolean)
         .join(', ') || null;
@@ -100,9 +101,12 @@ async function importFromOpenStreetMap(req, res) {
       skipped,
       total: elements.length,
     });
- } catch (err) {
-    console.error('OSM Import Error:', err.message, err.stack);
-    res.status(500).json({ error: 'Failed to import from OpenStreetMap', details: err.message });
+  } catch (err) {
+    console.error('OSM Import Error:', err.message);
+    res.status(500).json({
+      error: 'Failed to import from OpenStreetMap',
+      details: err.message,
+    });
   }
 }
 
